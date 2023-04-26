@@ -110,7 +110,7 @@ void RenderBusDescs(BusDescription* descs, int count, int status) {
   Serial.print("RenderBusDescs with count ");
   Serial.println(count);
   for (int i = 0; i < count; i++) {
-    Element line[13];
+    Element line[20];
     int el_idx = 0;
     for (int j = 0; j < 3; j++) {
       line[el_idx++] = DIGITS[descs[i].number[j] - '0'];
@@ -124,6 +124,13 @@ void RenderBusDescs(BusDescription* descs, int count, int status) {
         line[el_idx++] = DIGITS[descs[i].time[j] - '0'];
       }
     }
+    line[el_idx++] = SEP;
+
+    line[el_idx++] = DIGITS[(descs[i].stop_id / 1000) % 10];
+    line[el_idx++] = DIGITS[(descs[i].stop_id / 100) % 10];
+    line[el_idx++] = DIGITS[(descs[i].stop_id / 10) % 10];
+    line[el_idx++] = DIGITS[(descs[i].stop_id) % 10];
+
     Render(line, el_idx, (i+1) * DIGIT_HEIGHT);
   }
 
@@ -182,7 +189,9 @@ void refreshDisplay() {
     Serial.print(" - ");
     memcpy(buffer, results.descs[i].time, 5);
     buffer[5] = '\0';
-    Serial.println(buffer);
+    Serial.print(buffer);
+    Serial.print(" ");
+    Serial.println(results.descs[i].stop_id);
   }
 
   if (epd.Init() != 0) {
