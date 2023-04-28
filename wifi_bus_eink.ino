@@ -51,6 +51,7 @@ unsigned char printElements(bool last_in_line, int x_byte, int y) {
   char intersected_elements = 0;
   while (curr_re != nullptr) {
     if (y >= (curr_re->y - DIGIT_HEIGHT) && y < curr_re->y && x + 7 >= curr_re->x && x < (curr_re->x + curr_re->el.byte_width*8)) {
+
       // We're in this element!
       int element_left_byte_offset = (y - curr_re->y + DIGIT_HEIGHT) * curr_re->el.byte_width + (x - curr_re->x)/8;
       int element_right_byte_offset = (y - curr_re->y + DIGIT_HEIGHT) * curr_re->el.byte_width + (x + 8 - curr_re->x)/8;
@@ -60,23 +61,26 @@ unsigned char printElements(bool last_in_line, int x_byte, int y) {
       //  |_left_||_right_|
       //  So, want (left << (x%8)) | (right >> (8 - x%8))
       char left_byte = (x >= curr_re->x) ? pgm_read_byte_near(curr_re->el.data + element_left_byte_offset) : 0;
-      char right_byte = (((x - curr_re->x)/8 + 1) < curr_re->el.byte_width)? pgm_read_byte_near(curr_re->el.data + element_right_byte_offset) : 0;
+      char right_byte = (((x - curr_re->x)/8 + 1) < curr_re->el.byte_width) ? pgm_read_byte_near(curr_re->el.data + element_right_byte_offset) : 0;
+      
+      if (curr_re->el.data == SEP.data) {
+        if (((curr_re->y - y) == (DIGIT_HEIGHT/2)) && (x - curr_re->x > 5) && (x - curr_re->x - curr_re->el.advance < -5)) {
+          left_byte = 0xFF;
+          right_byte = 0xFF;
+        } else {
+          left_byte = 0;
+          right_byte = 0;
+        }
+      }
       intersected_elements = intersected_elements | ((left_byte << ((x - curr_re->x + 8)%8)) | (right_byte >> (8 - ((x - curr_re->x + 8)%8))));
-
-      // if x is 6 to the left of curr_re->x, i just want right_byte >> 6.
-      // x - curr_re->x == -6
-
-      //   x
-      //   v
-      //     |__el__|
     }
     curr_re = curr_re->next;
   }
   return intersected_elements;
 }
 
-void Render(Element* els, int len, int y) {
-  int curr_x = 0;
+void RenderLine(Element* els, int len, int x, int y) {
+  int curr_x = x;
   for (int i = 0; i < len; i++) {
     RenderElement* el = new RenderElement();
     el->x = curr_x;
@@ -96,6 +100,24 @@ void Render(Element* els, int len, int y) {
   }
 }
 
+void RenderCentredLine(Element* els, int len, int y) {
+  int width = 0;
+  for (int i = 0; i < len; i++) {
+    width += els[i].advance;
+  }
+
+  RenderLine(els, len, 400 - width/2, y);
+}
+
+void RenderRightAlignedLine(Element* els, int len, int y) {
+  int width = 0;
+  for (int i = 0; i < len; i++) {
+    width += els[i].advance;
+  }
+
+  RenderLine(els, len, 800 - 55 - width, y);
+}
+
 void ClearRenderElements() {
   RenderElement* next;
   while(render_elements) {
@@ -109,6 +131,9 @@ void RenderBusDescs(BusDescription* descs, int count, int status) {
   ClearRenderElements();
   Serial.print("RenderBusDescs with count ");
   Serial.println(count);
+  if (count > 7) {
+    count = 7;
+  }
   for (int i = 0; i < count; i++) {
     Element line[20];
     int el_idx = 0;
@@ -121,39 +146,51 @@ void RenderBusDescs(BusDescription* descs, int count, int status) {
       if (descs[i].time[j] == ':') {
         line[el_idx++] = COLON;
       } else {
-        line[el_idx++] = DIGITS[descs[i].time[j] - '0'];
+        line[el_idx++] = DIGITS_LIGHT[descs[i].time[j] - '0'];
       }
     }
     line[el_idx++] = SEP;
 
-    line[el_idx++] = DIGITS[(descs[i].stop_id / 1000) % 10];
-    line[el_idx++] = DIGITS[(descs[i].stop_id / 100) % 10];
-    line[el_idx++] = DIGITS[(descs[i].stop_id / 10) % 10];
-    line[el_idx++] = DIGITS[(descs[i].stop_id) % 10];
+    switch (descs[i].stop_id) {
+    case 4027:
+      line[el_idx++] = SKOLAN;
+      break;
+    case 4028:
+      line[el_idx++] = STUGAN;
+      break;
+    case 4010:
+      line[el_idx++] = TORGET;
+      break;
+    }
 
-    Render(line, el_idx, (i+1) * DIGIT_HEIGHT);
+    RenderCentredLine(line, el_idx, (i+1) * (DIGIT_HEIGHT+5) + (count > 4 ? 50 : 100));
   }
 
   int battery_percentage = readBatteryPercent();
-  int status_els = 8;
-  Element status_line[9];
-  status_line[0] = STATUS;
-  status_line[1] = DIGITS[(status / 10) % 10];
-  status_line[2] = DIGITS[status % 10];
-  status_line[3] = SEP;
-  status_line[4] = BATT;
-  if (battery_percentage >= 100) {
-    status_els = 9;
-    status_line[5] = DIGITS[battery_percentage / 100];
-    status_line[6] = DIGITS[(battery_percentage / 10) % 10];
-    status_line[7] = DIGITS[battery_percentage % 10];
-    status_line[8] = PERCENT;
-  } else {
-    status_line[5] = DIGITS[(battery_percentage / 10) % 10];
-    status_line[6] = DIGITS[battery_percentage % 10];
-    status_line[7] = PERCENT;
+
+  const int bottom_line_y = 450;
+
+  if(status != 0) {
+    status = status < 0 ? -1 * status : status;
+    int status_els = 0;
+    Element status_line[9];
+    status_line[status_els++] = STATUS;
+    status_line[status_els++] = DIGITS[(status / 10) % 10];
+    status_line[status_els++] = DIGITS[status % 10];
+    RenderCentredLine(status_line, status_els, bottom_line_y);
   }
-  Render(status_line, status_els, 480);
+  
+  if (battery_percentage >= 0) {
+    int batt_els = 0;
+    Element batt_line[9];
+    if (battery_percentage >= 100) {
+      batt_line[batt_els++] = DIGITS[battery_percentage / 100];
+    }
+    batt_line[batt_els++] = DIGITS[(battery_percentage / 10) % 10];
+    batt_line[batt_els++] = DIGITS[battery_percentage % 10];
+    batt_line[batt_els++] = PERCENT;
+    RenderRightAlignedLine(batt_line, batt_els, bottom_line_y);
+  }
 }
 
 Epd epd;
@@ -170,11 +207,18 @@ void refreshDisplay() {
   connectWifi();
   BusResults results = queryWebService();
   endWifi();
+
+  if (epd.Init() != 0) {
+      Serial.print("e-Paper init failed\r\n ");
+      return;
+  }
   
   Serial.print("Result: ");
   Serial.println(results.result);
   if (results.result != 0 ) {
-    RenderBusDescs(nullptr, 0, results.result * -1);
+    RenderBusDescs(nullptr, 0, results.result);
+    epd.DisplayBytes(&printElements);
+    epd.Sleep();
     return;
   }
 
@@ -192,11 +236,6 @@ void refreshDisplay() {
     Serial.print(buffer);
     Serial.print(" ");
     Serial.println(results.descs[i].stop_id);
-  }
-
-  if (epd.Init() != 0) {
-      Serial.print("e-Paper init failed\r\n ");
-      return;
   }
 
   RenderBusDescs(results.descs, results.len, 0);
