@@ -4,6 +4,7 @@
 struct BusDescription {
   char number[3];
   char time[5];
+  char mins[2];
   int journey_number;
   int stop_id;
 };

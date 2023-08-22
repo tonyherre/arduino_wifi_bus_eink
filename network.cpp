@@ -3,6 +3,7 @@
 #include "HttpClient.h"
 #include <ArduinoJson.h>
 #include "bus_description.h"
+#include "logging.h"
 
 char ssid[] = SECRET_SSID;
 char pass[] = SECRET_PASS;
@@ -11,29 +12,31 @@ int status = WL_IDLE_STATUS;
 // Number of milliseconds to wait without receiving any data before we give up
 const int kNetworkTimeout = 30*1000;
 // Number of milliseconds to wait if no data is available before trying again
-const int kNetworkDelay = 1000;
+const int kNetworkDelay = 50;
 
 char kHostname[] = "api.sl.se";
 char kPath[] = "/api2/realtimedeparturesV4.json?siteid=%d&timewindow=20&key=%s";
 
-int connectWifi() {
-
-  Serial.println("Setup");
-  
+bool checkWifi() {
   if (WiFi.status() == WL_NO_MODULE) {
     Serial.println("Communication with WiFi module failed!");
-    return -1;
+    return false;
   }
 
   String fv = WiFi.firmwareVersion();
   if (fv < WIFI_FIRMWARE_LATEST_VERSION) {
     Serial.println("Please upgrade the firmware");
+    return false;
   }
+  return true;
+}
+
+int connectWifi() {
+  DEBUG_PRINTLN("connectWifi");
 
   // attempt to connect to Wifi network:
-  
-  Serial.print("Attempting to connect to WPA SSID: ");
-  Serial.println(ssid);
+  DEBUG_PRINT("Attempting to connect to WPA SSID: ");
+  DEBUG_PRINTLN(ssid);
   // Connect to WPA/WPA2 network:
   status = WiFi.begin(ssid, pass);
 
@@ -44,7 +47,7 @@ int connectWifi() {
     delay(100);
   }
 
-  Serial.print("Connected to the network");
+  DEBUG_PRINT("Connected to the network");
   return 0;
 }
 
@@ -61,9 +64,28 @@ bool Earlier(BusDescription* bus1, BusDescription* bus2) {
   return false;
 }
 
-BusResults querySingleStop(int stop_id) {
-  Serial.println("\nStarting connection to server...");
-  WiFiSSLClient client;
+WiFiSSLClient client;
+
+const int kJsonError = 5;
+
+// time is formatted as 01:23:45
+int secondsSinceMidnight(const char* time) {
+  int seconds = 0;
+  seconds += ((time[0] - '0')*10 + (time[1] - '0')) * 3600;
+  seconds += ((time[3] - '0')*10 + (time[4] - '0')) * 60;
+  seconds += ((time[6] - '0')*10 + (time[7] - '0'));
+  return seconds;
+}
+
+int minutesUntil(const char* queryDateTime, int queryAgeSeconds, const char* datetime) {
+  int now_secs = secondsSinceMidnight(queryDateTime + 11) + queryAgeSeconds;
+  int time_secs = secondsSinceMidnight(datetime + 11);
+
+  return (time_secs - now_secs)/60;
+}
+
+BusResults querySingleStop(int stop_id, int minimum_mins) {
+  DEBUG_PRINTLN("\nStarting connection to server...");
   HttpClient http(client);
 
   char path_buffer[96];
@@ -75,7 +97,7 @@ BusResults querySingleStop(int stop_id) {
     Serial.println(err);
     return BusResults{result:err};
   }
-  Serial.println("startedRequest ok");
+  DEBUG_PRINTLN("startedRequest ok");
 
   err = http.responseStatusCode();
   if (err != 200) {
@@ -92,8 +114,8 @@ BusResults querySingleStop(int stop_id) {
   }
 
   int bodyLen = http.contentLength();
-  Serial.print("Content length is: ");
-  Serial.println(bodyLen);
+  DEBUG_PRINT("Content length is: ");
+  DEBUG_PRINTLN(bodyLen);
 
   unsigned long timeoutStart = millis();
 
@@ -110,7 +132,7 @@ BusResults querySingleStop(int stop_id) {
       if (http.available()) {
           c = http.read();
           // Print out this character
-          Serial.print(c);
+          DEBUG_PRINT(c);
           *curr_buffer_pos = c;
           curr_buffer_pos++;
           
@@ -124,6 +146,7 @@ BusResults querySingleStop(int stop_id) {
       }
   }
   http.stop();
+  DEBUG_PRINTLN();
 
   if (bodyLen) {
     // Didn't read the full body.
@@ -140,12 +163,12 @@ BusResults querySingleStop(int stop_id) {
   if (json_error) {
     Serial.print(F("deserializeJson() failed: "));
     Serial.println(json_error.f_str());
-    return BusResults{result:-5};
+    return BusResults{result: kJsonError};
   }
 
-  Serial.print("StatusCode: ");
+  DEBUG_PRINT("StatusCode: ");
   int status_code = json_doc["StatusCode"];
-  Serial.println(status_code);
+  DEBUG_PRINTLN(status_code);
 
   if (status_code != 0) {
     return BusResults{result:status_code};
@@ -165,6 +188,22 @@ BusResults querySingleStop(int stop_id) {
     if(bus["JourneyDirection"] != 2)
       continue; // Probably means it's not going into town.
 
+    int mins = minutesUntil(json_doc["ResponseData"]["LatestUpdate"], json_doc["ResponseData"]["DataAge"], bus["ExpectedDateTime"]);
+    /*
+    const char* display_time = bus["DisplayTime"];
+    int mins = 0;
+    if (display_time[0] == 'N') {
+      mins = 0;
+    } else if (display_time[1] == ' ') {
+      mins = display_time[0] - '0';
+    } else {
+      mins = (display_time[0] - '0')*10 + display_time[1] - '0';
+    }
+    */
+    if (mins < minimum_mins) {
+      continue;
+    }
+
     const char* line_number = bus["LineNumber"];
     memcpy(&descs[matching_busses].number, line_number, 3);
 
@@ -173,6 +212,19 @@ BusResults querySingleStop(int stop_id) {
 
     descs[matching_busses].journey_number = bus["JourneyNumber"];
     descs[matching_busses].stop_id = stop_id;
+/*
+    if(display_time[0] == 'N') {
+      descs[matching_busses].mins[0] = '0';
+      descs[matching_busses].mins[1] = '0';
+    } else if (display_time[1] == ' ') {
+      descs[matching_busses].mins[0] = '0';
+      descs[matching_busses].mins[1] = display_time[0];
+    } else {
+      memcpy(&descs[matching_busses].mins, display_time, 2);
+    }
+    */
+    descs[matching_busses].mins[0] = ((mins / 10) % 10) + '0';
+    descs[matching_busses].mins[1] = (mins % 10) + '0';
 
     matching_busses++;
   }
@@ -184,16 +236,32 @@ BusResults querySingleStop(int stop_id) {
   };
 }
 
+const int kRetries = 3;
+
+BusResults querySingleStopWithRetries(int stop_id, int minimum_mins) {
+  BusResults last_error;
+  for (int attempt = 0; attempt < kRetries; attempt++) {
+    BusResults results = querySingleStop(stop_id, minimum_mins);
+    if (results.result == 0) {
+      return results;
+    }
+    last_error = results;
+  }
+  return last_error;
+}
 
 BusResults queryWebService() {
-  BusResults results1 = querySingleStop(4010);
+  // 4010 - torget
+  BusResults results1 = querySingleStopWithRetries(4010, 3);
   if (results1.result != 0) {
     Serial.println("Stop1 failed");
     return results1;
   }
   Serial.print("Stop1 gave result count: ");
   Serial.println(results1.len);
-  BusResults results2 = querySingleStop(4028);
+
+  // 4028 - Stugan
+  BusResults results2 = querySingleStopWithRetries(4028, 5);
   if (results2.result != 0) {
     Serial.println("Stop2 failed");
     free(results1.descs);
@@ -201,7 +269,9 @@ BusResults queryWebService() {
   }
   Serial.print("Stop2 gave result count: ");
   Serial.println(results2.len);
-  BusResults results3 = querySingleStop(4027);
+
+  // 4027 - Skolan
+  BusResults results3 = querySingleStopWithRetries(4027, 15);
   if (results3.result != 0) {
     Serial.println("Stop3 failed");
     free(results1.descs);
@@ -257,8 +327,8 @@ BusResults queryWebService() {
   }
   free(results3.descs);
 
-  Serial.print("Combined to give a result count of : ");
-  Serial.println(unique_result_count);
+  DEBUG_PRINT("Combined to give a result count of : ");
+  DEBUG_PRINTLN(unique_result_count);
 
   // Bubble sort 'cos I'm lazy (and the list is always small anyway).
   while(true) {

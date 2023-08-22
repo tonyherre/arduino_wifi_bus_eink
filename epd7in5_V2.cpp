@@ -25,6 +25,7 @@
  */
 
 #include <stdlib.h>
+#include <ArduinoLowPower.h>
 #include "epd7in5_V2.h"
 
 unsigned char Voltage_Frame_7IN5_V2[]={
@@ -226,15 +227,23 @@ void Epd::Reset(void) {
 }
 
 void Epd::DisplayBytes(unsigned char (*next_byte)(bool, int, int)) {
-    SendCommand(0x13);
-    for (unsigned long y = 0; y < height; y++) {
-        for (unsigned long x_byte = 0; x_byte < width/8; x_byte++) {
-            SendData((*next_byte)(x_byte == (width/8 - 1), x_byte, y));
-        }
-    }
-    SendCommand(0x12);
-    DelayMs(100);
-    WaitUntilIdle();
+  Serial.println("Epd::DisplayBytes");
+  SendCommand(0x13);
+  for (unsigned long y = 0; y < height; y++) {
+      for (unsigned long x_byte = 0; x_byte < width/8; x_byte++) {
+        SendData((*next_byte)(x_byte == (width/8 - 1), x_byte, y));
+      }
+  }
+  SendCommand(0x12);
+  if (!Serial) {
+    LowPower.deepSleep(2000);
+  } else {
+    Serial.println("Simulating sleep for 2 seconds");
+    delay(2000);
+  }
+  Serial.println("Epd::DisplayBytes waiting until idle");
+  WaitUntilIdle();
+  Serial.println("Epd::DisplayBytes returning");
 }
 
 void Epd::DisplayPattern(bool (*pixel_on)(int, int)) {

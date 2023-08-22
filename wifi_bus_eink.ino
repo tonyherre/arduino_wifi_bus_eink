@@ -27,12 +27,12 @@
 #include <SPI.h>
 #include <ArduinoLowPower.h>
 
-
 #include "epd7in5_V2.h"
 #include "imagedata.h"
 #include "network.h"
 #include "bus_description.h"
 #include "battery_monitor.h"
+#include "logging.h"
 
 struct RenderElement {
   int x;
@@ -45,34 +45,37 @@ struct RenderElement {
 
 RenderElement* render_elements = nullptr;
 
+unsigned char getElementByte(RenderElement* curr_re, int x, int y) {
+  int element_left_byte_offset = (y - curr_re->y + DIGIT_HEIGHT) * curr_re->el.byte_width + (x - curr_re->x)/8;
+  int element_right_byte_offset = (y - curr_re->y + DIGIT_HEIGHT) * curr_re->el.byte_width + (x + 8 - curr_re->x)/8;
+  //    x
+  //    v
+  //    --want--
+  //  |_left_||_right_|
+  //  So, want (left << (x%8)) | (right >> (8 - x%8))
+  char left_byte = (x >= curr_re->x) ? pgm_read_byte_near(curr_re->el.data + element_left_byte_offset) : 0;
+  char right_byte = (((x - curr_re->x)/8 + 1) < curr_re->el.byte_width) ? pgm_read_byte_near(curr_re->el.data + element_right_byte_offset) : 0;
+  
+  if (curr_re->el.data == SEP.data) {
+    if (((curr_re->y - y) == (DIGIT_HEIGHT/2)) && (x - curr_re->x > 5) && (x - curr_re->x - curr_re->el.advance < -5)) {
+      left_byte = 0xFF;
+      right_byte = 0xFF;
+    } else {
+      left_byte = 0;
+      right_byte = 0;
+    }
+  }
+  return ((left_byte << ((x - curr_re->x + 8)%8)) | (right_byte >> (8 - ((x - curr_re->x + 8)%8))));
+}
+
 unsigned char printElements(bool last_in_line, int x_byte, int y) {
   int x = x_byte * 8;
   RenderElement* curr_re = render_elements;
   char intersected_elements = 0;
   while (curr_re != nullptr) {
     if (y >= (curr_re->y - DIGIT_HEIGHT) && y < curr_re->y && x + 7 >= curr_re->x && x < (curr_re->x + curr_re->el.byte_width*8)) {
-
       // We're in this element!
-      int element_left_byte_offset = (y - curr_re->y + DIGIT_HEIGHT) * curr_re->el.byte_width + (x - curr_re->x)/8;
-      int element_right_byte_offset = (y - curr_re->y + DIGIT_HEIGHT) * curr_re->el.byte_width + (x + 8 - curr_re->x)/8;
-      //    x
-      //    v
-      //    --want--
-      //  |_left_||_right_|
-      //  So, want (left << (x%8)) | (right >> (8 - x%8))
-      char left_byte = (x >= curr_re->x) ? pgm_read_byte_near(curr_re->el.data + element_left_byte_offset) : 0;
-      char right_byte = (((x - curr_re->x)/8 + 1) < curr_re->el.byte_width) ? pgm_read_byte_near(curr_re->el.data + element_right_byte_offset) : 0;
-      
-      if (curr_re->el.data == SEP.data) {
-        if (((curr_re->y - y) == (DIGIT_HEIGHT/2)) && (x - curr_re->x > 5) && (x - curr_re->x - curr_re->el.advance < -5)) {
-          left_byte = 0xFF;
-          right_byte = 0xFF;
-        } else {
-          left_byte = 0;
-          right_byte = 0;
-        }
-      }
-      intersected_elements = intersected_elements | ((left_byte << ((x - curr_re->x + 8)%8)) | (right_byte >> (8 - ((x - curr_re->x + 8)%8))));
+      intersected_elements = intersected_elements | getElementByte(curr_re, x, y);
     }
     curr_re = curr_re->next;
   }
@@ -129,22 +132,28 @@ void ClearRenderElements() {
 
 void RenderBusDescs(BusDescription* descs, int count, int status) {
   ClearRenderElements();
-  Serial.print("RenderBusDescs with count ");
-  Serial.println(count);
+  DEBUG_PRINT("RenderBusDescs with count ");
+  DEBUG_PRINTLN(count);
   if (count > 7) {
     count = 7;
   }
   for (int i = 0; i < count; i++) {
-    Element line[20];
+    Element line[30];
     int el_idx = 0;
     for (int j = 0; j < 3; j++) {
       line[el_idx++] = DIGITS[descs[i].number[j] - '0'];
     }
     line[el_idx++] = SEP;
 
+    for (int j = 0; j < 2; j++) {
+      line[el_idx++] = DIGITS[descs[i].mins[j] - '0'];
+    }
+    line[el_idx++] = MINS;
+  //  line[el_idx++] = SEP;
+
     for (int j = 0; j < 5; j++) {
       if (descs[i].time[j] == ':') {
-        line[el_idx++] = COLON;
+        line[el_idx++] = COLON_LIGHT;
       } else {
         line[el_idx++] = DIGITS_LIGHT[descs[i].time[j] - '0'];
       }
@@ -163,7 +172,7 @@ void RenderBusDescs(BusDescription* descs, int count, int status) {
       break;
     }
 
-    RenderCentredLine(line, el_idx, (i+1) * (DIGIT_HEIGHT+5) + (count > 4 ? 50 : 100));
+    RenderCentredLine(line, el_idx, (i+1) * (DIGIT_HEIGHT+5) + 50);
   }
 
   int battery_percentage = readBatteryPercent();
@@ -171,12 +180,24 @@ void RenderBusDescs(BusDescription* descs, int count, int status) {
   const int bottom_line_y = 450;
 
   if(status != 0) {
+    bool neg = status < 0;
     status = status < 0 ? -1 * status : status;
     int status_els = 0;
     Element status_line[9];
     status_line[status_els++] = STATUS;
-    status_line[status_els++] = DIGITS[(status / 10) % 10];
-    status_line[status_els++] = DIGITS[status % 10];
+    if (neg) {
+      status_line[status_els++] = SEP;
+    }
+    if (status >= 1000) {
+      status_line[status_els++] = DIGITS_SMALL[(status / 1000) % 10];
+    }
+    if (status >= 100) {
+      status_line[status_els++] = DIGITS_SMALL[(status / 100) % 10];
+    }
+    if (status >= 10) {
+      status_line[status_els++] = DIGITS_SMALL[(status / 10) % 10];
+    }
+    status_line[status_els++] = DIGITS_SMALL[status % 10];
     RenderCentredLine(status_line, status_els, bottom_line_y);
   }
   
@@ -184,10 +205,10 @@ void RenderBusDescs(BusDescription* descs, int count, int status) {
     int batt_els = 0;
     Element batt_line[9];
     if (battery_percentage >= 100) {
-      batt_line[batt_els++] = DIGITS[battery_percentage / 100];
+      batt_line[batt_els++] = DIGITS_SMALL[battery_percentage / 100];
     }
-    batt_line[batt_els++] = DIGITS[(battery_percentage / 10) % 10];
-    batt_line[batt_els++] = DIGITS[battery_percentage % 10];
+    batt_line[batt_els++] = DIGITS_SMALL[(battery_percentage / 10) % 10];
+    batt_line[batt_els++] = DIGITS_SMALL[battery_percentage % 10];
     batt_line[batt_els++] = PERCENT;
     RenderRightAlignedLine(batt_line, batt_els, bottom_line_y);
   }
@@ -199,8 +220,17 @@ void setup() {
   // put your setup code here, to run once:
   Serial.begin(9600);
 
+  // Wait 1 second for a serial connection
+  unsigned long start = millis();
+  while(!Serial && (millis() - start < 1000) ){}
+
   Serial.println("Setup");
   batterySetup();
+  if (!checkWifi()) {
+    Serial.println("Failed checking wifi. Sleeping forever.");
+    RenderBusDescs(nullptr, 0, -99);
+    LowPower.deepSleep();
+  }
 }
 
 void refreshDisplay() {
@@ -213,8 +243,8 @@ void refreshDisplay() {
       return;
   }
   
-  Serial.print("Result: ");
-  Serial.println(results.result);
+  DEBUG_PRINT("Result: ");
+  DEBUG_PRINTLN(results.result);
   if (results.result != 0 ) {
     RenderBusDescs(nullptr, 0, results.result);
     epd.DisplayBytes(&printElements);
@@ -240,15 +270,26 @@ void refreshDisplay() {
 
   RenderBusDescs(results.descs, results.len, 0);
 
+  DEBUG_PRINTLN("Displaying prepared bytes");
   epd.DisplayBytes(&printElements);
+
+  DEBUG_PRINTLN("Sleeping display");
   epd.Sleep();
+  
+  DEBUG_PRINTLN("refreshDisplay returning");
+ 
+  free(results.descs);
 }
 
 void loop() {
+  unsigned long start_millis = millis();
+  Serial.println("Starting battery refresh");
   refreshDisplay();
 
-  Serial.println("Done, sleeping");
-  // Sleep for 10s, staying away if we're not connected to a serial connection over USB for debugging/programming
+  Serial.print("Done, sleeping. Took ");
+  Serial.print(millis() - start_millis);
+  Serial.println("ms");
+  // Sleep for 5min, staying away if we're not connected to a serial connection over USB for debugging/programming
   const int kRefreshPeriodMillis = 5 * 60 * 1000;
   if (Serial) {
     delay(kRefreshPeriodMillis);
