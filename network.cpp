@@ -87,6 +87,7 @@ int minutesUntil(const char* queryDateTime, int queryAgeSeconds, const char* dat
 BusResults querySingleStop(int stop_id, int minimum_mins) {
   DEBUG_PRINTLN("\nStarting connection to server...");
   HttpClient http(client);
+  DEBUG_PRINTLN("Have client");
 
   char path_buffer[96];
   sprintf(path_buffer, kPath, stop_id, SECRET_SL_API_KEY);
